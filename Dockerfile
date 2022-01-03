@@ -1,34 +1,52 @@
-# Fully qualified container name prevents public registry typosquatting
-FROM docker.io/library/python:3-alpine
+# The build-stage image:
+FROM continuumio/miniconda3 AS build
+
+# Install the package as normal:
+COPY src/environment.yml .
+RUN conda env create -f environment.yml
+
+# Install conda-pack:
+RUN conda install -c conda-forge conda-pack
+
+# Use conda-pack to create a standalone enviornment
+# in /venv:
+RUN conda-pack -n vue -o /tmp/env.tar && \
+  mkdir /venv && cd /venv && tar xf /tmp/env.tar && \
+  rm /tmp/env.tar
+
+# We've put venv in same path it'll be in final image,
+# so now fix up paths:
+RUN /venv/bin/conda-unpack
+
+
+# The runtime-stage image; we can use Debian as the
+# base image since the Conda env also includes Python
+# for us.
+FROM debian:buster AS runtime
 
 ARG UID=1012
 ARG GID=1012
 
-RUN addgroup -S -g $GID vuegraf
-RUN adduser  -S -g $GID -u $UID -h /opt/vuegraf vuegraf
+RUN addgroup --gid $GID vuegraf
+RUN adduser --gid $GID --uid $UID --home /opt/vuegraf vuegraf
+# Copy /venv from the previous stage:
+COPY --from=build /venv /venv
 
 WORKDIR /opt/vuegraf
-
-# Install pip dependencies with minimal container layer size growth
-COPY src/requirements.txt ./
-RUN set -x && \
-    apk add --no-cache build-base libffi-dev rust cargo openssl-dev && \
-    pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt && \
-    apk del build-base libffi-dev rust cargo openssl-dev && \
-    rm -rf /var/cache/apk /opt/vuegraf/requirements.txt
-
-# Copying code in after requirements are built optimizes rebuild
-# time, with only a marginal increate in image layer size; chmod
-# is superfluous if "git update-index --chmod=+x ..." is done.
 COPY src/vuegraf/*.py ./
-RUN  chmod a+x *.py
-
-# A numeric UID is required for runAsNonRoot=true to succeed
+# RUN  chmod a+x *.py
+RUN  chmod 755 *.py
 USER $UID
 
 VOLUME /opt/vuegraf/conf
 
-ENTRYPOINT ["/opt/vuegraf/vuegraf.py" ]
-CMD ["/opt/vuegraf/conf/vuegraf.json"]
+# When image is run, run the code with the environment
+# activated:
+SHELL ["/bin/bash", "-c"]
 
+RUN source /venv/bin/activate && pip install pyemvue
+
+# ENTRYPOINT ["/bin/bash"]
+ENTRYPOINT source /venv/bin/activate && \
+           python /opt/vuegraf/vuegraf.py /opt/vuegraf/conf/vuegraf.json
+# CMD ["/opt/vuegraf/conf/vuegraf.json"]

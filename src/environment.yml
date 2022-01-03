@@ -1,0 +1,9 @@
+name: vue
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - pgcopy=1.5.0
+  - psycopg2=2.9.3
+  - python=3.9
+prefix: /home/justin/miniconda3/envs/vue
