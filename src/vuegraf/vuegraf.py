@@ -8,11 +8,15 @@ import time
 import traceback
 from threading import Event
 
+# Timescale
+import psycopg2
+from pgcopy import CopyManager
+
 # InfluxDB v1
-import influxdb
+# import influxdb
 
 # InfluxDB v2
-import influxdb_client
+# import influxdb_client
 
 from pyemvue import PyEmVue
 from pyemvue.enums import Scale, Unit
@@ -56,59 +60,35 @@ def populateDevices(account):
             channelIdMap[key] = chan
             info("Discovered new channel: {} ({})".format(chan.name, chan.channel_num))
 
-def lookupDeviceName(account, device_gid):
-    if device_gid not in account['deviceIdMap']:
-        populateDevices(account)
+# def lookupDeviceName(account, device_gid):
+#     if device_gid not in account['deviceIdMap']:
+#         populateDevices(account)
 
-    deviceName = "{}".format(device_gid)
-    if device_gid in account['deviceIdMap']:
-        deviceName = account['deviceIdMap'][device_gid].device_name
-    return deviceName
+#     deviceName = "{}".format(device_gid)
+#     if device_gid in account['deviceIdMap']:
+#         deviceName = account['deviceIdMap'][device_gid].device_name
+#     return deviceName
 
-def lookupChannelName(account, chan):
-    if chan.device_gid not in account['deviceIdMap']:
-        populateDevices(account)
+# def lookupChannelName(account, chan):
+#     if chan.device_gid not in account['deviceIdMap']:
+#         populateDevices(account)
 
-    deviceName = lookupDeviceName(account, chan.device_gid)
-    name = "{}-{}".format(deviceName, chan.channel_num)
+#     deviceName = lookupDeviceName(account, chan.device_gid)
+#     name = "{}-{}".format(deviceName, chan.channel_num)
 
-    try:
-        num = int(chan.channel_num)
-        if 'devices' in account:
-            for device in account['devices']:
-                if 'name' in device and device['name'] == deviceName:
-                    if 'channels' in device and len(device['channels']) >= num:
-                        name = device['channels'][num - 1]
-                        break
-    except:
-        if chan.channel_num == '1,2,3':
-            name = deviceName
+#     try:
+#         num = int(chan.channel_num)
+#         if 'devices' in account:
+#             for device in account['devices']:
+#                 if 'name' in device and device['name'] == deviceName:
+#                     if 'channels' in device and len(device['channels']) >= num:
+#                         name = device['channels'][num - 1]
+#                         break
+#     except:
+#         if chan.channel_num == '1,2,3':
+#             name = deviceName
 
-    return name
-
-def createDataPoint(account, chanName, watts, timestamp, detailed):
-    dataPoint = None
-    if influxVersion == 2:
-        dataPoint = influxdb_client.Point("energy_usage") \
-            .tag("account_name", account['name']) \
-            .tag("device_name", chanName) \
-            .tag("detailed", detailed) \
-            .field("usage", watts) \
-            .time(time=timestamp)
-    else:
-        dataPoint = {
-            "measurement": "energy_usage",
-            "tags": {
-                "account_name": account['name'],
-                "device_name": chanName,
-                "detailed": detailed,
-            },
-            "fields": {
-                "usage": watts,
-            },
-            "time": timestamp
-        }
-    return dataPoint
+#     return name
 
 def extractDataPoints(device, usageDataPoints):
     excludedDetailChannelNumbers = ['Balance', 'TotalUsage']
@@ -116,27 +96,32 @@ def extractDataPoints(device, usageDataPoints):
     secondsInAMinute = 60
     wattsInAKw = 1000
 
-    for chanNum, chan in device.channels.items():
-        if chan.nested_devices:
-            for gid, nestedDevice in chan.nested_devices.items():
-                extractDataPoints(nestedDevice, usageDataPoints)
-
-        kwhUsage = chan.usage
-        if kwhUsage is not None:
-            chanName = lookupChannelName(account, chan)
-            watts = float(minutesInAnHour * wattsInAKw) * kwhUsage
-            timestamp = stopTime
-            usageDataPoints.append(createDataPoint(account, chanName, watts, timestamp, False))
-
-        if detailedEnabled and chanNum not in excludedDetailChannelNumbers:
+    if detailedEnabled:
+        timestamps = [detailedStartTime + datetime.timedelta(seconds=s) for s in range(intervalSecs)]
+        deviceId = [device.device_gid for _ in range(intervalSecs)]
+        usageDataPoints.append(timestamps)
+        usageDataPoints.append(deviceId)
+        for chanNum, chan in device.channels.items():
+            if chan.name == 'Balance': continue
             usage, usage_start_time = account['vue'].get_chart_usage(chan, detailedStartTime, stopTime, scale=Scale.SECOND.value, unit=Unit.KWH.value)
-            index = 0
-            for kwhUsage in usage:
-                if kwhUsage is not None:
-                    timestamp = detailedStartTime + datetime.timedelta(seconds=index)
-                    watts = float(secondsInAMinute * minutesInAnHour * wattsInAKw) * kwhUsage
-                    usageDataPoints.append(createDataPoint(account, chanName, watts, timestamp, True))
-                    index += 1
+            usages = [float(secondsInAMinute * minutesInAnHour * wattsInAKw) * kwhUsage for kwhUsage in usage]
+            usageDataPoints.append(usages)
+
+    else:
+        usageDataPoints.append(stopTime)
+        usageDataPoints.append(device.device_gid)
+        for chanNum, chan in device.channels.items():
+            if chan.name == 'Balance': continue
+            usageDataPoints.append(float(minutesInAnHour * wattsInAKw) * chan.usage)
+
+def submitDataPoints(conn, usageDataPoints):
+    cursor = conn.cursor()
+    chans = ['chan'+ str(x) for x in range(1,17)]
+    cols = ['time','device_id','total',*chans]
+    mgr = CopyManager(conn, 'vue', cols)
+    data = list(zip(*usageDataPoints)) if type(usageDataPoints[0]) == list else [usageDataPoints]
+    mgr.copy(data)
+    conn.commit()
 
 startupTime = datetime.datetime.utcnow()
 try:
@@ -149,58 +134,6 @@ try:
     with open(configFilename) as configFile:
         config = json.load(configFile)
 
-    influxVersion = 1
-    if 'version' in config['influxDb']:
-        influxVersion = config['influxDb']['version']
-
-    bucket = ''
-    write_api = None
-    query_api = None
-    sslVerify = True
-
-    if 'ssl_verify' in config['influxDb']:
-        sslVerify = config['influxDb']['ssl_verify']
-
-    if influxVersion == 2:
-        info('Using InfluxDB version 2')
-        bucket = config['influxDb']['bucket']
-        org = config['influxDb']['org']
-        token = config['influxDb']['token']
-        url= config['influxDb']['url']
-        influx2 = influxdb_client.InfluxDBClient(
-           url=url,
-           token=token,
-           org=org,
-           verify_ssl=sslVerify
-        )
-        write_api = influx2.write_api(write_options=influxdb_client.client.write_api.SYNCHRONOUS)
-        query_api = influx2.query_api()
-
-        if config['influxDb']['reset']:
-            info('Resetting database')
-            delete_api = influx2.delete_api()
-            start = "1970-01-01T00:00:00Z"
-            stop = startupTime.isoformat(timespec='seconds')
-            delete_api.delete(start, stop, '_measurement="energy_usage"', bucket=bucket, org=org)    
-    else:
-        info('Using InfluxDB version 1')
-
-        sslEnable = False
-        if 'ssl_enable' in config['influxDb']:
-            sslEnable = config['influxDb']['ssl_enable']
-
-        # Only authenticate to ingress if 'user' entry was provided in config
-        if 'user' in config['influxDb']:
-            influx = influxdb.InfluxDBClient(host=config['influxDb']['host'], port=config['influxDb']['port'], username=config['influxDb']['user'], password=config['influxDb']['pass'], database=config['influxDb']['database'], ssl=sslEnable, verify_ssl=sslVerify)
-        else:
-            influx = influxdb.InfluxDBClient(host=config['influxDb']['host'], port=config['influxDb']['port'], database=config['influxDb']['database'], ssl=sslEnable, verify_ssl=sslVerify)
-
-        influx.create_database(config['influxDb']['database'])
-
-        if config['influxDb']['reset']:
-            info('Resetting database')
-            influx.delete_series(measurement='energy_usage')
-
     running = True
 
     signal.signal(signal.SIGINT, handleExit)
@@ -212,6 +145,8 @@ try:
     detailedIntervalSecs=getConfigValue("detailedIntervalSecs", 3600)
     lagSecs=getConfigValue("lagSecs", 5)
     detailedStartTime = startupTime
+
+    conn = psycopg2.connect(config['timescale']['connection'])
 
     while running:
         now = datetime.datetime.utcnow()
@@ -234,12 +169,9 @@ try:
                         extractDataPoints(device, usageDataPoints)
 
                     info('Submitting datapoints to database; account="{}"; points={}'.format(account['name'], len(usageDataPoints)))
-                    if influxVersion == 2:
-                        write_api.write(bucket=bucket, record=usageDataPoints)
-                    else:
-                        influx.write_points(usageDataPoints)
-
-            except:
+                    submitDataPoints(conn, usageDataPoints)
+            except Exception as e:
+                print(e)
                 error('Failed to record new usage data: {}'.format(sys.exc_info())) 
                 traceback.print_exc()
 
