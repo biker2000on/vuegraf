@@ -12,12 +12,6 @@ from threading import Event
 import psycopg2
 from pgcopy import CopyManager
 
-# InfluxDB v1
-# import influxdb
-
-# InfluxDB v2
-# import influxdb_client
-
 from pyemvue import PyEmVue
 from pyemvue.enums import Scale, Unit
 
@@ -90,11 +84,13 @@ def populateDevices(account):
 
 #     return name
 
-def extractDataPoints(device, usageDataPoints):
+def extractDataPoints(device):
     excludedDetailChannelNumbers = ['Balance', 'TotalUsage']
     minutesInAnHour = 60
     secondsInAMinute = 60
     wattsInAKw = 1000
+    usageDataPoints = []
+    cols = ['time','device_id','total']
 
     if detailedEnabled:
         timestamps = [detailedStartTime + datetime.timedelta(seconds=s) for s in range(intervalSecs)]
@@ -103,6 +99,8 @@ def extractDataPoints(device, usageDataPoints):
         usageDataPoints.append(deviceId)
         for chanNum, chan in device.channels.items():
             if chan.name == 'Balance': continue
+            if chanNum != '1,2,3':
+                cols.append('chan' + chanNum)
             usage, usage_start_time = account['vue'].get_chart_usage(chan, detailedStartTime, stopTime, scale=Scale.SECOND.value, unit=Unit.KWH.value)
             usages = [float(secondsInAMinute * minutesInAnHour * wattsInAKw) * kwhUsage for kwhUsage in usage]
             usageDataPoints.append(usages)
@@ -112,12 +110,16 @@ def extractDataPoints(device, usageDataPoints):
         usageDataPoints.append(device.device_gid)
         for chanNum, chan in device.channels.items():
             if chan.name == 'Balance': continue
+            if chanNum != '1,2,3':
+                cols.append('chan' + chanNum)
             usageDataPoints.append(float(minutesInAnHour * wattsInAKw) * chan.usage)
 
-def submitDataPoints(conn, usageDataPoints):
+    return cols, usageDataPoints
+
+def submitDataPoints(conn, usageDataPoints, cols):
     cursor = conn.cursor()
     chans = ['chan'+ str(x) for x in range(1,17)]
-    cols = ['time','device_id','total',*chans]
+    # cols = ['time','device_id','total',*chans]
     mgr = CopyManager(conn, 'vue', cols)
     data = list(zip(*usageDataPoints)) if type(usageDataPoints[0]) == list else [usageDataPoints]
     mgr.copy(data)
@@ -164,12 +166,11 @@ try:
                 deviceGids = list(account['deviceIdMap'].keys())
                 usages = account['vue'].get_device_list_usage(deviceGids, stopTime, scale=Scale.MINUTE.value, unit=Unit.KWH.value)
                 if usages is not None:
-                    usageDataPoints = []
                     for gid, device in usages.items():
-                        extractDataPoints(device, usageDataPoints)
+                        cols, usageDataPoints = extractDataPoints(device)
 
                     info('Submitting datapoints to database; account="{}"; points={}'.format(account['name'], len(usageDataPoints)))
-                    submitDataPoints(conn, usageDataPoints)
+                    submitDataPoints(conn, usageDataPoints, cols)
             except Exception as e:
                 print(e)
                 error('Failed to record new usage data: {}'.format(sys.exc_info())) 

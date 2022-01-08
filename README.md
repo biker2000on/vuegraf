@@ -13,7 +13,7 @@ This project is not affiliated with _emporia energy_ company.
 ## Required
 * [Emporia Vue](https://emporiaenergy.com "Emporia Energy") Account - Username and password for the Emporia Vue system are required.
 * [Python 3](https://python.org "Python") - With Pip.
-* [InfluxDB](https://influxdata.com "InfluxDB") - Host, port, and login credentials are required.
+* [TimescaleDB](https://timescale.com) - Host, port, and login credentials are required.
 
 ## Recommended
 * [Grafana](https://grafana.com "Grafana") - Can be used to read metrics from the InfluxDB.
