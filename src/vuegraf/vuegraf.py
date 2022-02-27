@@ -8,9 +8,8 @@ import time
 import traceback
 from threading import Event
 
-# Timescale
-import psycopg2
-from pgcopy import CopyManager
+# MQTT
+import paho.mqtt.publish as publish
 
 from pyemvue import PyEmVue
 from pyemvue.enums import Scale, Unit
@@ -54,35 +53,6 @@ def populateDevices(account):
             channelIdMap[key] = chan
             info("Discovered new channel: {} ({})".format(chan.name, chan.channel_num))
 
-# def lookupDeviceName(account, device_gid):
-#     if device_gid not in account['deviceIdMap']:
-#         populateDevices(account)
-
-#     deviceName = "{}".format(device_gid)
-#     if device_gid in account['deviceIdMap']:
-#         deviceName = account['deviceIdMap'][device_gid].device_name
-#     return deviceName
-
-# def lookupChannelName(account, chan):
-#     if chan.device_gid not in account['deviceIdMap']:
-#         populateDevices(account)
-
-#     deviceName = lookupDeviceName(account, chan.device_gid)
-#     name = "{}-{}".format(deviceName, chan.channel_num)
-
-#     try:
-#         num = int(chan.channel_num)
-#         if 'devices' in account:
-#             for device in account['devices']:
-#                 if 'name' in device and device['name'] == deviceName:
-#                     if 'channels' in device and len(device['channels']) >= num:
-#                         name = device['channels'][num - 1]
-#                         break
-#     except:
-#         if chan.channel_num == '1,2,3':
-#             name = deviceName
-
-#     return name
 
 def extractDataPoints(device):
     excludedDetailChannelNumbers = ['Balance', 'TotalUsage']
@@ -93,37 +63,40 @@ def extractDataPoints(device):
     cols = ['time','device_id','total']
 
     if detailedEnabled:
-        timestamps = [detailedStartTime + datetime.timedelta(seconds=s) for s in range(intervalSecs)]
+        timestamps = [(detailedStartTime + datetime.timedelta(seconds=s)).isoformat() for s in range(intervalSecs)]
         deviceId = [device.device_gid for _ in range(intervalSecs)]
         usageDataPoints.append(timestamps)
         usageDataPoints.append(deviceId)
         for chanNum, chan in device.channels.items():
             if chan.name == 'Balance': continue
             if chanNum != '1,2,3':
-                cols.append('chan' + chanNum)
+                cols.append(chan.name.replace(' ','_') + '_' + chanNum)
+                # cols.append('chan' + chanNum)
             usage, usage_start_time = account['vue'].get_chart_usage(chan, detailedStartTime, stopTime, scale=Scale.SECOND.value, unit=Unit.KWH.value)
             usages = [float(secondsInAMinute * minutesInAnHour * wattsInAKw) * kwhUsage for kwhUsage in usage]
             usageDataPoints.append(usages)
 
     else:
-        usageDataPoints.append(stopTime)
-        usageDataPoints.append(device.device_gid)
+        usageDataPoints.append([stopTime.isoformat()])
+        usageDataPoints.append([device.device_gid])
         for chanNum, chan in device.channels.items():
             if chan.name == 'Balance': continue
             if chanNum != '1,2,3':
-                cols.append('chan' + chanNum)
-            usageDataPoints.append(float(minutesInAnHour * wattsInAKw) * chan.usage)
+                cols.append(chan.name.replace(' ','_') + '_' + chanNum)
+                # cols.append('chan' + chanNum)
+            usageDataPoints.append([float(minutesInAnHour * wattsInAKw) * chan.usage])
 
     return cols, usageDataPoints
 
-def submitDataPoints(conn, usageDataPoints, cols):
-    cursor = conn.cursor()
-    chans = ['chan'+ str(x) for x in range(1,17)]
-    # cols = ['time','device_id','total',*chans]
-    mgr = CopyManager(conn, 'vue', cols)
-    data = list(zip(*usageDataPoints)) if type(usageDataPoints[0]) == list else [usageDataPoints]
-    mgr.copy(data)
-    conn.commit()
+def submitDataPoints(usageDataPoints, cols):
+    msgs = []
+    for i, v in enumerate(usageDataPoints[0]):
+        payload = {}
+        for j, data in enumerate(usageDataPoints):
+            payload[cols[j]] = data[i]
+        msgs.append({'topic': 'home/energy', 'payload': json.dumps(payload)})
+    # msgs = 
+    publish.multiple(msgs, hostname='192.168.4.100')
 
 startupTime = datetime.datetime.utcnow()
 try:
@@ -148,8 +121,6 @@ try:
     lagSecs=getConfigValue("lagSecs", 5)
     detailedStartTime = startupTime
 
-    conn = psycopg2.connect(config['timescale']['connection'])
-
     while running:
         now = datetime.datetime.utcnow()
         stopTime = now - datetime.timedelta(seconds=lagSecs)
@@ -170,7 +141,7 @@ try:
                         cols, usageDataPoints = extractDataPoints(device)
 
                     info('Submitting datapoints to database; account="{}"; points={}'.format(account['name'], len(usageDataPoints)))
-                    submitDataPoints(conn, usageDataPoints, cols)
+                    submitDataPoints(usageDataPoints, cols)
             except Exception as e:
                 print(e)
                 error('Failed to record new usage data: {}'.format(sys.exc_info())) 
