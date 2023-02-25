@@ -7,6 +7,7 @@ import sys
 import time
 import traceback
 from threading import Event
+import logging
 
 # MQTT
 import paho.mqtt.publish as publish
@@ -14,21 +15,13 @@ import paho.mqtt.publish as publish
 from pyemvue import PyEmVue
 from pyemvue.enums import Scale, Unit
 
-# flush=True helps when running in a container without a tty attached
-# (alternatively, "python -u" or PYTHONUNBUFFERED will help here)
-def log(level, msg):
-    now = datetime.datetime.utcnow()
-    print('{} | {} | {}'.format(now, level.ljust(5), msg), flush=True)
+logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s', level=logging.INFO, datefmt='%I:%M:%S')
+logger = logging.getLogger()
 
-def info(msg):
-    log("INFO", msg)
-
-def error(msg):
-    log("ERROR", msg)
 
 def handleExit(signum, frame):
     global running
-    error('Caught exit signal')
+    logger.error('Caught exit signal')
     running = False
     pauseEvent.set()
 
@@ -51,7 +44,7 @@ def populateDevices(account):
             if chan.name is None and chan.channel_num == '1,2,3':
                 chan.name = device.device_name
             channelIdMap[key] = chan
-            info("Discovered new channel: {} ({})".format(chan.name, chan.channel_num))
+            logger.info("Discovered new channel: {} ({})".format(chan.name, chan.channel_num))
 
 
 def extractDataPoints(device):
@@ -63,8 +56,9 @@ def extractDataPoints(device):
     cols = ['time','device_id','total']
 
     if detailedEnabled:
-        timestamps = [(detailedStartTime + datetime.timedelta(seconds=s)).isoformat() for s in range(intervalSecs)]
-        deviceId = [device.device_gid for _ in range(intervalSecs)]
+        length_timestamps = int((stopTime - detailedStartTime).total_seconds())
+        timestamps = [(detailedStartTime + datetime.timedelta(seconds=s)).isoformat() for s in range(length_timestamps)]
+        deviceId = [device.device_gid for _ in range(length_timestamps)]
         usageDataPoints.append(timestamps)
         usageDataPoints.append(deviceId)
         for chanNum, chan in device.channels.items():
@@ -88,15 +82,17 @@ def extractDataPoints(device):
 
     return cols, usageDataPoints
 
-def submitDataPoints(usageDataPoints, cols):
+def submitDataPoints(usageDataPoints, cols, broker):
     msgs = []
     for i, v in enumerate(usageDataPoints[0]):
         payload = {}
         for j, data in enumerate(usageDataPoints):
-            payload[cols[j]] = data[i]
+            try:
+                payload[cols[j]] = data[i]
+            except Exception as e:
+                logger.error(f'Channel: {cols[j]}; timeLength: {len(usageDataPoints[0])}; dataLength: {len(data)}')
         msgs.append({'topic': 'home/energy', 'payload': json.dumps(payload)})
-    # msgs = 
-    publish.multiple(msgs, hostname='192.168.4.100')
+    publish.multiple(msgs, hostname=broker)
 
 startupTime = datetime.datetime.utcnow()
 try:
@@ -117,8 +113,9 @@ try:
     pauseEvent = Event()
 
     intervalSecs=getConfigValue("updateIntervalSecs", 60)
-    detailedIntervalSecs=getConfigValue("detailedIntervalSecs", 3600)
+    detailedIntervalSecs=getConfigValue("detailedIntervalSecs", 30) # default is to pull every seconds data
     lagSecs=getConfigValue("lagSecs", 5)
+    broker = getConfigValue("mqttBroker", "192.168.1.1")
     detailedStartTime = startupTime
 
     while running:
@@ -130,7 +127,7 @@ try:
             if 'vue' not in account:
                 account['vue'] = PyEmVue()
                 account['vue'].login(username=account['email'], password=account['password'])
-                info('Login completed')
+                logger.info('Login completed')
                 populateDevices(account)
 
             try:
@@ -140,11 +137,11 @@ try:
                     for gid, device in usages.items():
                         cols, usageDataPoints = extractDataPoints(device)
 
-                    info('Submitting datapoints to database; account="{}"; points={}'.format(account['name'], len(usageDataPoints)))
-                    submitDataPoints(usageDataPoints, cols)
+                    logger.info(f'Submitting datapoints to database; account="{account["name"]}"; channels={len(usageDataPoints)}, points={len(usageDataPoints[0])}')
+                    submitDataPoints(usageDataPoints, cols, broker)
             except Exception as e:
                 print(e)
-                error('Failed to record new usage data: {}'.format(sys.exc_info())) 
+                logger.error('Failed to record new usage data: {}'.format(sys.exc_info())) 
                 traceback.print_exc()
 
         if detailedEnabled:
@@ -152,8 +149,6 @@ try:
 
         pauseEvent.wait(intervalSecs)
 
-    info('Finished')
-except:
-    error('Fatal error: {}'.format(sys.exc_info())) 
-    traceback.print_exc()
-
+    logger.info('Finished')
+except Exception as e:
+    logger.error(e) 

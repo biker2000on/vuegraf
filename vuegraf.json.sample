@@ -9,6 +9,12 @@
         "ssl_enable": false,
         "ssl_verify": true
     },
+    "timescale": {
+        "connection": "postgres://timescale:timescale@192.168.4.112:5433/timescale",
+        "schema": "public",
+        "table": "energy_monitor"
+    },
+    "mqttBroker": "192.168.1.1",
     "accounts": [
         {
             "name": "Primary Residence",

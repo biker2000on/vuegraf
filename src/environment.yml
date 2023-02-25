@@ -1,8 +1,0 @@
-name: vue
-channels:
-  - defaults
-  - conda-forge
-dependencies:
-  - paho-mqtt=1.6.0
-  - python=3.9
-prefix: /home/justin/miniconda3/envs/vue
