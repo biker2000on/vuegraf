@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "vuegraf"
+version = "0.1.0"
+description = ""
+authors = ["Justin Crawford <bikerhiker10@gmail.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+pyemvue = "^0.16.2"
+paho-mqtt = "^1.6.1"
+psycopg2-binary = "^2.9.5"
+
+[tool.poetry.dev-dependencies]
+ipykernel = "^6.21.2"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

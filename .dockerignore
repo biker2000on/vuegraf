@@ -1,0 +1,6 @@
+.venv
+.vscode
+.github
+screenshots
+.gitignore
+*.sample
