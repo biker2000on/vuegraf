@@ -4,5 +4,5 @@ services:
         build: .
         container_name: vuegraf
         volumes:
-           - ./vuegraf.json:/opt/vuegraf/conf/vuegraf.json #This assumes you have created a folder called vuegraf and placed the vuegraf.json file inside of it.
+           - ./vuegraf.json:/app/conf/vuegraf.json #This assumes you have created a folder called vuegraf and placed the vuegraf.json file inside of it.
         restart: always 

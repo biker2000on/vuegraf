@@ -15,7 +15,7 @@ import paho.mqtt.publish as publish
 from pyemvue import PyEmVue
 from pyemvue.enums import Scale, Unit
 
-logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s', level=logging.INFO, datefmt='%I:%M:%S')
+logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s', level=logging.INFO, datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger()
 
 
